@@ -19,11 +19,6 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-let usuarios = [];
-let colegios = [];
-let listas = {};
-let registros = [];
-
 function validarRUT(rut) {
   let rutLimpio = rut.replace(/\./g, '').replace(/-/g, '').replace(/\s/g, '');
   if (rutLimpio.length < 7 || rutLimpio.length > 9) return false;
@@ -283,7 +278,10 @@ app.post('/api/registro', async (req, res) => {
     
     const token = jwt.sign({ id: usuario.id }, JWT_SECRET, { expiresIn: '30d' });
     res.json({ success: true, token, usuario: { id: usuario.id, nombre, email: usuario.email, plan: 'gratis' } });
-  } catch (error) { res.status(500).json({ error: 'Error del servidor' }); }
+      } catch (error) { 
+    console.log(error);
+    res.status(500).json({ error: error.message }); 
+  }
 });
 
 app.post('/api/login', async (req, res) => {
