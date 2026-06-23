@@ -483,6 +483,6 @@ app.get('/api/descargar-pdf/:listaId', (req, res) => {
 // ============================================
 // INICIAR
 // ============================================
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log('✅ Servidor listo en http://localhost:' + PORT);
 });
