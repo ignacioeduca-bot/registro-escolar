@@ -355,7 +355,7 @@ app.post('/api/crear-lista', autenticar, async (req, res) => {
     
     const id = uuidv4();
     const shortCode = uuidv4().substring(0, 8);
-    const urlRegistro = req.protocol + '://' + req.get('host') + '/r/' + shortCode;
+    const urlRegistro = 'https://registro-escolar.onrender.com/r/' + shortCode;
     const qrCode = await QRCode.toDataURL(urlRegistro, { width: 400, margin: 2 });
     
     const { data: lista, error } = await supabase.from('listas').insert({
