@@ -9,6 +9,12 @@ const app = express();
 const PORT = 3000;
 const JWT_SECRET = 'registro_escolar_secreto_2025';
 
+const { createClient } = require('@supabase/supabase-js');
+const supabase = createClient(
+  'https://knhtuhpynkczcbvvibgw.supabase.co',
+  'sb_publishable_1DrtBXI_fZzlChcNE85W4w_Z7voGx4j'
+);
+
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -264,11 +270,17 @@ app.post('/api/registro', async (req, res) => {
     if (!nombre || !email || !password) return res.status(400).json({ error: 'Todos los campos son obligatorios' });
     if (password.length < 6) return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
     if (!validarEmail(email)) return res.status(400).json({ error: 'Email inválido' });
-    const existe = usuarios.find(u => u.email === email.toLowerCase());
+    
+    const { data: existe } = await supabase.from('usuarios').select('id').eq('email', email.toLowerCase()).single();
     if (existe) return res.status(400).json({ error: 'Este email ya está registrado' });
+    
     const hashedPassword = await bcrypt.hash(password, 10);
-    const usuario = { id: uuidv4(), nombre, email: email.toLowerCase(), password: hashedPassword, fechaRegistro: new Date(), plan: 'gratis' };
-    usuarios.push(usuario);
+    const { data: usuario, error } = await supabase.from('usuarios').insert({
+      nombre, email: email.toLowerCase(), password: hashedPassword
+    }).select().single();
+    
+    if (error) throw error;
+    
     const token = jwt.sign({ id: usuario.id }, JWT_SECRET, { expiresIn: '30d' });
     res.json({ success: true, token, usuario: { id: usuario.id, nombre, email: usuario.email, plan: 'gratis' } });
   } catch (error) { res.status(500).json({ error: 'Error del servidor' }); }
@@ -277,10 +289,12 @@ app.post('/api/registro', async (req, res) => {
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    const usuario = usuarios.find(u => u.email === email.toLowerCase());
+    const { data: usuario } = await supabase.from('usuarios').select('*').eq('email', email.toLowerCase()).single();
     if (!usuario) return res.status(401).json({ error: 'Email o contraseña incorrectos' });
+    
     const valido = await bcrypt.compare(password, usuario.password);
     if (!valido) return res.status(401).json({ error: 'Email o contraseña incorrectos' });
+    
     const token = jwt.sign({ id: usuario.id }, JWT_SECRET, { expiresIn: '30d' });
     res.json({ success: true, token, usuario: { id: usuario.id, nombre: usuario.nombre, email: usuario.email, plan: usuario.plan } });
   } catch (error) { res.status(500).json({ error: 'Error del servidor' }); }
@@ -289,28 +303,44 @@ app.post('/api/login', async (req, res) => {
 // ============================================
 // API: DATOS
 // ============================================
-app.get('/api/mis-datos', autenticar, (req, res) => {
-  const usuario = usuarios.find(u => u.id === req.usuarioId);
-  if (!usuario) return res.status(404).json({ error: 'Usuario no encontrado' });
-  const misColegios = colegios.filter(c => c.usuarioId === req.usuarioId);
-  const misListas = {};
-  Object.values(listas).forEach(l => { if (l.usuarioId === req.usuarioId) misListas[l.id] = l; });
-  res.json({ usuario: { nombre: usuario.nombre, email: usuario.email, plan: usuario.plan }, colegios: misColegios, listas: misListas });
+app.get('/api/mis-datos', autenticar, async (req, res) => {
+  try {
+    const { data: usuario } = await supabase.from('usuarios').select('nombre,email,plan').eq('id', req.usuarioId).single();
+    if (!usuario) return res.status(404).json({ error: 'Usuario no encontrado' });
+    
+    const { data: misColegios } = await supabase.from('colegios').select('*').eq('usuario_id', req.usuarioId);
+    const { data: misListas } = await supabase.from('listas').select('*').eq('usuario_id', req.usuarioId);
+    
+    const listasObj = {};
+    if (misListas) misListas.forEach(l => { listasObj[l.id] = l; });
+    
+    res.json({ usuario, colegios: misColegios || [], listas: listasObj });
+  } catch (error) { res.status(500).json({ error: 'Error del servidor' }); }
 });
 
-app.get('/api/todos-registros', autenticar, (req, res) => {
-  const ids = Object.values(listas).filter(l => l.usuarioId === req.usuarioId).map(l => l.id);
-  res.json({ registros: registros.filter(r => ids.includes(r.listaId)) });
+app.get('/api/todos-registros', autenticar, async (req, res) => {
+  try {
+    const { data: misListas } = await supabase.from('listas').select('id').eq('usuario_id', req.usuarioId);
+    if (!misListas || misListas.length === 0) return res.json({ registros: [] });
+    
+    const ids = misListas.map(l => l.id);
+    const { data: registros } = await supabase.from('registros').select('*').in('lista_id', ids);
+    res.json({ registros: registros || [] });
+  } catch (error) { res.status(500).json({ error: 'Error' }); }
 });
 
 // ============================================
 // API: COLEGIOS
 // ============================================
-app.post('/api/colegios', autenticar, (req, res) => {
+app.post('/api/colegios', autenticar, async (req, res) => {
   const { nombre, rbd } = req.body;
-  if (!nombre || nombre.trim().length < 3) return res.status(400).json({ error: 'Nombre requerido (mínimo 3 caracteres)' });
-  const colegio = { id: uuidv4(), usuarioId: req.usuarioId, nombre: nombre.trim(), rbd: rbd ? rbd.trim() : '', fechaCreacion: new Date() };
-  colegios.push(colegio);
+  if (!nombre || nombre.trim().length < 3) return res.status(400).json({ error: 'Nombre requerido' });
+  
+  const { data: colegio, error } = await supabase.from('colegios').insert({
+    usuario_id: req.usuarioId, nombre: nombre.trim(), rbd: rbd || ''
+  }).select().single();
+  
+  if (error) return res.status(500).json({ error: 'Error al guardar' });
   res.json({ success: true, colegio });
 });
 
@@ -321,36 +351,48 @@ app.post('/api/crear-lista', autenticar, async (req, res) => {
   try {
     const { colegioId, curso, seccion } = req.body;
     if (!colegioId || !curso) return res.status(400).json({ error: 'Colegio y curso requeridos' });
-    const colegio = colegios.find(c => c.id === colegioId && c.usuarioId === req.usuarioId);
+    
+    const { data: colegio } = await supabase.from('colegios').select('*').eq('id', colegioId).eq('usuario_id', req.usuarioId).single();
     if (!colegio) return res.status(404).json({ error: 'Colegio no encontrado' });
+    
     const id = uuidv4();
     const shortCode = uuidv4().substring(0, 8);
     const urlRegistro = req.protocol + '://' + req.get('host') + '/r/' + shortCode;
     const qrCode = await QRCode.toDataURL(urlRegistro, { width: 400, margin: 2 });
-    const lista = { id, usuarioId: req.usuarioId, colegioId, colegioNombre: colegio.nombre, curso, seccion: seccion || '', shortCode, urlRegistro, qrCode, fechaCreacion: new Date() };
+    
+    const { data: lista, error } = await supabase.from('listas').insert({
+      id, usuario_id: req.usuarioId, colegio_id: colegioId,
+      colegio_nombre: colegio.nombre, curso, seccion: seccion || '',
+      short_code: shortCode, url_registro: urlRegistro, qr_code: qrCode
+    }).select().single();
+    
+    if (error) throw error;
+    
     listas[id] = lista;
     res.json({ success: true, lista });
   } catch (error) { res.status(500).json({ error: 'Error al crear lista' }); }
 });
 
-app.get('/api/lista/:id', autenticar, (req, res) => {
-  const lista = listas[req.params.id];
-  if (!lista || lista.usuarioId !== req.usuarioId) return res.status(404).json({ error: 'No encontrada' });
+app.get('/api/lista/:id', autenticar, async (req, res) => {
+  const { data: lista } = await supabase.from('listas').select('*').eq('id', req.params.id).eq('usuario_id', req.usuarioId).single();
+  if (!lista) return res.status(404).json({ error: 'No encontrada' });
   res.json({ lista });
 });
 
 // ============================================
 // API: REGISTROS
 // ============================================
-app.get('/api/buscar/:listaId/:rut', (req, res) => {
-  const reg = registros.find(r => r.listaId === req.params.listaId && r.rutEstudiante === formatearRUT(req.params.rut));
+app.get('/api/buscar/:listaId/:rut', async (req, res) => {
+  const rutFormateado = formatearRUT(req.params.rut);
+  const { data: reg } = await supabase.from('registros').select('*').eq('lista_id', req.params.listaId).eq('rut_estudiante', rutFormateado).single();
   res.json(reg ? { existe: true, registro: reg } : { existe: false });
 });
 
-app.post('/api/registrar/:code', (req, res) => {
+app.post('/api/registrar/:code', async (req, res) => {
   try {
     const datos = req.body;
     const errores = [];
+    
     if (!datos.nombresApoderado || datos.nombresApoderado.trim().length < 2) errores.push('Nombres del apoderado requeridos');
     if (!datos.apellidoPaternoApoderado || datos.apellidoPaternoApoderado.trim().length < 2) errores.push('Apellido paterno del apoderado requerido');
     if (!datos.apellidoMaternoApoderado || datos.apellidoMaternoApoderado.trim().length < 2) errores.push('Apellido materno del apoderado requerido');
@@ -366,19 +408,52 @@ app.post('/api/registrar/:code', (req, res) => {
     if (!datos.rutEstudiante || !validarRUT(datos.rutEstudiante)) errores.push('RUT del estudiante inválido');
     if (errores.length > 0) return res.status(400).json({ success: false, errores });
     
-    const lista = Object.values(listas).find(l => l.shortCode === req.params.code);
+    const { data: lista } = await supabase.from('listas').select('*').eq('short_code', req.params.code).single();
     if (!lista) return res.status(404).json({ success: false, errores: ['Lista no encontrada'] });
     
     if (datos.modo === 'editar' && datos.registroId) {
-      const idx = registros.findIndex(r => r.id === datos.registroId);
-      if (idx !== -1) {
-        registros[idx] = { ...registros[idx], nombresApoderado: datos.nombresApoderado.trim(), apellidoPaternoApoderado: datos.apellidoPaternoApoderado.trim(), apellidoMaternoApoderado: datos.apellidoMaternoApoderado.trim(), rutApoderado: formatearRUT(datos.rutApoderado), email: datos.email.trim().toLowerCase(), telefono: formatearTelefono(datos.telefono), direccion: datos.direccion.trim(), comuna: datos.comuna.trim(), relacion: datos.relacion, nombresEstudiante: datos.nombresEstudiante.trim(), apellidoPaternoEstudiante: datos.apellidoPaternoEstudiante.trim(), apellidoMaternoEstudiante: datos.apellidoMaternoEstudiante.trim(), actualizado: true, fechaActualizacion: new Date() };
-        return res.json({ success: true, mensaje: 'Actualizado' });
-      }
+      const { error } = await supabase.from('registros').update({
+        nombres_apoderado: datos.nombresApoderado.trim(),
+        apellido_paterno_apoderado: datos.apellidoPaternoApoderado.trim(),
+        apellido_materno_apoderado: datos.apellidoMaternoApoderado.trim(),
+        rut_apoderado: formatearRUT(datos.rutApoderado),
+        email: datos.email.trim().toLowerCase(),
+        telefono: formatearTelefono(datos.telefono),
+        direccion: datos.direccion.trim(),
+        comuna: datos.comuna.trim(),
+        relacion: datos.relacion,
+        nombres_estudiante: datos.nombresEstudiante.trim(),
+        apellido_paterno_estudiante: datos.apellidoPaternoEstudiante.trim(),
+        apellido_materno_estudiante: datos.apellidoMaternoEstudiante.trim(),
+        actualizado: true,
+        fecha_actualizacion: new Date()
+      }).eq('id', datos.registroId);
+      
+      if (error) throw error;
+      return res.json({ success: true, mensaje: 'Actualizado' });
     }
     
-    const registro = { id: uuidv4(), listaId: lista.id, colegioNombre: lista.colegioNombre, curso: lista.curso, seccion: lista.seccion, nombresApoderado: datos.nombresApoderado.trim(), apellidoPaternoApoderado: datos.apellidoPaternoApoderado.trim(), apellidoMaternoApoderado: datos.apellidoMaternoApoderado.trim(), rutApoderado: formatearRUT(datos.rutApoderado), email: datos.email.trim().toLowerCase(), telefono: formatearTelefono(datos.telefono), direccion: datos.direccion.trim(), comuna: datos.comuna.trim(), relacion: datos.relacion, nombresEstudiante: datos.nombresEstudiante.trim(), apellidoPaternoEstudiante: datos.apellidoPaternoEstudiante.trim(), apellidoMaternoEstudiante: datos.apellidoMaternoEstudiante.trim(), rutEstudiante: formatearRUT(datos.rutEstudiante), fechaRegistro: new Date(), actualizado: false };
-    registros.push(registro);
+    const { error } = await supabase.from('registros').insert({
+      lista_id: lista.id,
+      colegio_nombre: lista.colegio_nombre,
+      curso: lista.curso,
+      seccion: lista.seccion,
+      nombres_apoderado: datos.nombresApoderado.trim(),
+      apellido_paterno_apoderado: datos.apellidoPaternoApoderado.trim(),
+      apellido_materno_apoderado: datos.apellidoMaternoApoderado.trim(),
+      rut_apoderado: formatearRUT(datos.rutApoderado),
+      email: datos.email.trim().toLowerCase(),
+      telefono: formatearTelefono(datos.telefono),
+      direccion: datos.direccion.trim(),
+      comuna: datos.comuna.trim(),
+      relacion: datos.relacion,
+      nombres_estudiante: datos.nombresEstudiante.trim(),
+      apellido_paterno_estudiante: datos.apellidoPaternoEstudiante.trim(),
+      apellido_materno_estudiante: datos.apellidoMaternoEstudiante.trim(),
+      rut_estudiante: formatearRUT(datos.rutEstudiante)
+    });
+    
+    if (error) throw error;
     res.json({ success: true, mensaje: '¡Registro exitoso!' });
   } catch (error) { res.status(500).json({ success: false, errores: ['Error del servidor'] }); }
 });
@@ -386,98 +461,97 @@ app.post('/api/registrar/:code', (req, res) => {
 // ============================================
 // DESCARGAS
 // ============================================
-app.get('/api/descargar-excel/:listaId', (req, res) => {
+app.get('/api/descargar-excel/:listaId', async (req, res) => {
   try {
     const XLSX = require('xlsx');
-    const lista = listas[req.params.listaId];
+    const { data: lista } = await supabase.from('listas').select('*').eq('id', req.params.listaId).single();
     if (!lista) return res.status(404).send('No encontrada');
-    const datos = registros.filter(r => r.listaId === req.params.listaId).sort((a,b) => a.apellidoPaternoEstudiante.localeCompare(b.apellidoPaternoEstudiante)).map(r => ({ 'Apellido P. Estudiante': r.apellidoPaternoEstudiante, 'Apellido M. Estudiante': r.apellidoMaternoEstudiante, 'Nombres Estudiante': r.nombresEstudiante, 'RUT Estudiante': r.rutEstudiante, 'Curso': r.curso, 'Sección': r.seccion, 'Colegio': r.colegioNombre, 'Apellido P. Apoderado': r.apellidoPaternoApoderado, 'Apellido M. Apoderado': r.apellidoMaternoApoderado, 'Nombres Apoderado': r.nombresApoderado, 'RUT Apoderado': r.rutApoderado, 'Email': r.email, 'Teléfono': r.telefono, 'WhatsApp': 'https://wa.me/'+r.telefono.replace('+',''), 'Dirección': r.direccion, 'Comuna': r.comuna, 'Relación': r.relacion, 'Fecha Registro': new Date(r.fechaRegistro).toLocaleString('es-CL'), 'Actualizado': r.actualizado?'Sí':'No' }));
+    
+    const { data: regs } = await supabase.from('registros').select('*').eq('lista_id', req.params.listaId).order('apellido_paterno_estudiante');
+    
+    const datos = (regs || []).map(r => ({
+      'Apellido P. Estudiante': r.apellido_paterno_estudiante,
+      'Apellido M. Estudiante': r.apellido_materno_estudiante,
+      'Nombres Estudiante': r.nombres_estudiante,
+      'RUT Estudiante': r.rut_estudiante,
+      'Curso': r.curso, 'Sección': r.seccion,
+      'Colegio': r.colegio_nombre,
+      'Apellido P. Apoderado': r.apellido_paterno_apoderado,
+      'Apellido M. Apoderado': r.apellido_materno_apoderado,
+      'Nombres Apoderado': r.nombres_apoderado,
+      'RUT Apoderado': r.rut_apoderado,
+      'Email': r.email, 'Teléfono': r.telefono,
+      'WhatsApp': 'https://wa.me/' + r.telefono.replace('+', ''),
+      'Dirección': r.direccion, 'Comuna': r.comuna,
+      'Relación': r.relacion,
+      'Fecha Registro': new Date(r.fecha_registro).toLocaleString('es-CL'),
+      'Actualizado': r.actualizado ? 'Sí' : 'No'
+    }));
+    
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(datos), 'Apoderados');
     const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename='+encodeURIComponent(lista.colegioNombre+'_'+lista.curso+'.xlsx'));
+    res.setHeader('Content-Disposition', 'attachment; filename=' + encodeURIComponent(lista.colegio_nombre + '_' + lista.curso + '.xlsx'));
     res.send(buf);
   } catch (e) { res.status(500).send('Error'); }
 });
 
-app.get('/api/descargar-pdf/:listaId', (req, res) => {
+app.get('/api/descargar-pdf/:listaId', async (req, res) => {
   try {
     const PDFDocument = require('pdfkit');
-    const lista = listas[req.params.listaId];
+    const { data: lista } = await supabase.from('listas').select('*').eq('id', req.params.listaId).single();
     if (!lista) return res.status(404).send('No encontrada');
     
-    const regs = registros
-      .filter(r => r.listaId === req.params.listaId)
-      .sort((a,b) => a.apellidoPaternoEstudiante.localeCompare(b.apellidoPaternoEstudiante));
+    const { data: regs } = await supabase.from('registros').select('*').eq('lista_id', req.params.listaId).order('apellido_paterno_estudiante');
     
     const doc = new PDFDocument({ margin: 30, size: 'A4', layout: 'landscape' });
-    
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'attachment; filename="'+encodeURIComponent(lista.colegioNombre+'_'+lista.curso)+'.pdf"');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + encodeURIComponent(lista.colegio_nombre + '_' + lista.curso) + '.pdf"');
     doc.pipe(res);
     
-    // Título
     doc.fontSize(18).fillColor('#667eea').text('Registro de Apoderados', { align: 'center' });
-    doc.fontSize(12).fillColor('#666').text(lista.colegioNombre+' - '+lista.curso+' '+lista.seccion, { align: 'center' });
+    doc.fontSize(12).fillColor('#666').text(lista.colegio_nombre + ' - ' + lista.curso + ' ' + lista.seccion, { align: 'center' });
     doc.moveDown(0.5);
-    doc.fontSize(9).fillColor('#999').text('Descargado: '+new Date().toLocaleString('es-CL')+' | Total: '+regs.length, { align: 'center' });
+    doc.fontSize(9).fillColor('#999').text('Descargado: ' + new Date().toLocaleString('es-CL') + ' | Total: ' + (regs || []).length, { align: 'center' });
     doc.moveDown(1);
     
-    // Tabla
     const tableTop = doc.y;
     const colWidths = [130, 70, 130, 80, 130, 60];
     const headers = ['Estudiante', 'RUT', 'Apoderado', 'Teléfono', 'Email', 'Comuna'];
     
-    // Cabecera
     doc.fontSize(8).fillColor('white');
     let xPos = 30;
     headers.forEach((h, i) => {
       doc.rect(xPos, tableTop, colWidths[i], 18).fill('#667eea');
-      doc.fillColor('white').text(h, xPos + 3, tableTop + 4, { width: colWidths[i] - 6, align: 'left' });
+      doc.fillColor('white').text(h, xPos + 3, tableTop + 4, { width: colWidths[i] - 6 });
       xPos += colWidths[i];
     });
     
-    // Datos
     let yPos = tableTop + 18;
     doc.fontSize(7);
     
-    regs.forEach((r, rowIdx) => {
-      if (yPos > 550) {
-        doc.addPage();
-        yPos = 30;
-      }
-      
-      const rowColor = rowIdx % 2 === 0 ? '#ffffff' : '#f7f7f7';
+    (regs || []).forEach((r, rowIdx) => {
+      if (yPos > 550) { doc.addPage(); yPos = 30; }
       xPos = 30;
-      
+      const rowColor = rowIdx % 2 === 0 ? '#ffffff' : '#f7f7f7';
       const rowData = [
-        r.apellidoPaternoEstudiante+' '+r.apellidoMaternoEstudiante+', '+r.nombresEstudiante,
-        r.rutEstudiante,
-        r.apellidoPaternoApoderado+' '+r.apellidoMaternoApoderado+', '+r.nombresApoderado,
-        r.telefono,
-        r.email,
-        r.comuna
+        r.apellido_paterno_estudiante + ' ' + r.apellido_materno_estudiante + ', ' + r.nombres_estudiante,
+        r.rut_estudiante,
+        r.apellido_paterno_apoderado + ' ' + r.apellido_materno_apoderado + ', ' + r.nombres_apoderado,
+        r.telefono, r.email, r.comuna
       ];
-      
       rowData.forEach((text, i) => {
         doc.rect(xPos, yPos, colWidths[i], 16).fill(rowColor);
-        doc.fillColor('#333').text(text, xPos + 3, yPos + 3, { width: colWidths[i] - 6, align: 'left' });
+        doc.fillColor('#333').text(text, xPos + 3, yPos + 3, { width: colWidths[i] - 6 });
         xPos += colWidths[i];
       });
-      
       yPos += 16;
     });
     
-    // Footer
-    doc.fontSize(7).fillColor('#999').text('Generado por app Registro de Apoderados - '+new Date().toLocaleString('es-CL'), 30, doc.page.height - 30, { align: 'center' });
-    
+    doc.fontSize(7).fillColor('#999').text('Generado por app Registro de Apoderados', 30, doc.page.height - 30, { align: 'center' });
     doc.end();
-    
-  } catch (e) {
-    console.error('Error PDF:', e);
-    res.status(500).send('Error al generar PDF');
-  }
+  } catch (e) { res.status(500).send('Error al generar PDF'); }
 });
 
 // ============================================
